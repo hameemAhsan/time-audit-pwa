@@ -333,7 +333,33 @@
 
   function initPwa() {
     if ('serviceWorker' in navigator) {
-      navigator.serviceWorker.register('./service-worker.js').catch(console.error);
+      navigator.serviceWorker.register('./service-worker.js').then(registration => {
+
+        // If a new SW is already waiting (e.g. page was open during deploy), activate it now
+        if (registration.waiting) {
+          registration.waiting.postMessage({ type: 'SKIP_WAITING' });
+        }
+
+        // If a new SW installs while the page is open, tell it to activate immediately
+        registration.addEventListener('updatefound', () => {
+          const newWorker = registration.installing;
+          newWorker.addEventListener('statechange', () => {
+            if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
+              newWorker.postMessage({ type: 'SKIP_WAITING' });
+            }
+          });
+        });
+
+      }).catch(console.error);
+
+      // When the active SW changes, reload once so the new SW serves fresh assets
+      let refreshing = false;
+      navigator.serviceWorker.addEventListener('controllerchange', () => {
+        if (!refreshing) {
+          refreshing = true;
+          window.location.reload();
+        }
+      });
     }
 
     window.addEventListener('beforeinstallprompt', event => {
