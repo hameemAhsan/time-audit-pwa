@@ -14,9 +14,10 @@ const APP_SHELL = [
 
 self.addEventListener('install', event => {
   event.waitUntil(
-    caches.open(CACHE_NAME).then(cache => cache.addAll(APP_SHELL))
+    caches.open(CACHE_NAME)
+      .then(cache => cache.addAll(APP_SHELL))
+      .then(() => self.skipWaiting())  // ← inside the chain, after caching is done
   );
-  self.skipWaiting();
 });
 
 self.addEventListener('activate', event => {
@@ -27,9 +28,8 @@ self.addEventListener('activate', event => {
           .filter(key => key !== CACHE_NAME)
           .map(key => caches.delete(key))
       )
-    )
+    ).then(() => self.clients.claim())  // ← also chained, not floating
   );
-  self.clients.claim();
 });
 
 self.addEventListener('fetch', event => {
@@ -37,7 +37,7 @@ self.addEventListener('fetch', event => {
 
   const requestUrl = new URL(event.request.url);
 
-  // Only handle this GitHub Pages app path. Do not hijack the whole github.io domain.
+  // Only handle requests within this app's scope
   if (requestUrl.origin !== self.location.origin || !requestUrl.pathname.startsWith(APP_BASE)) {
     return;
   }
@@ -46,6 +46,11 @@ self.addEventListener('fetch', event => {
     caches.match(event.request).then(cachedResponse => {
       if (cachedResponse) return cachedResponse;
 
+      // For navigate requests that miss the cache, serve index.html (SPA fallback)
+      if (event.request.mode === 'navigate') {
+        return caches.match(`${APP_BASE}index.html`);
+      }
+
       return fetch(event.request)
         .then(networkResponse => {
           const responseCopy = networkResponse.clone();
@@ -53,9 +58,6 @@ self.addEventListener('fetch', event => {
           return networkResponse;
         })
         .catch(() => {
-          if (event.request.mode === 'navigate') {
-            return caches.match(`${APP_BASE}offline.html`);
-          }
           return new Response('', { status: 504, statusText: 'Offline' });
         });
     })
@@ -72,11 +74,9 @@ self.addEventListener('notificationclick', event => {
           return client.focus();
         }
       }
-
       if (clients.openWindow) {
         return clients.openWindow(APP_BASE);
       }
-
       return undefined;
     })
   );
