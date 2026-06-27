@@ -1,4 +1,4 @@
-const CACHE_NAME = 'time-audit-pwa-v7.0.0'; // ← bump this on every deploy
+const CACHE_NAME = 'time-audit-pwa-v8.0.0'; // ← bump this on every deploy
 const APP_BASE = '/time-audit-pwa/';
 
 const APP_SHELL = [
