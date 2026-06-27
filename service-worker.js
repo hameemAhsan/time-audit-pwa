@@ -1,4 +1,4 @@
-const CACHE_NAME = 'time-audit-pwa-v6.0.0';
+const CACHE_NAME = 'time-audit-pwa-v7.0.0'; // ← bump this on every deploy
 const APP_BASE = '/time-audit-pwa/';
 
 const APP_SHELL = [
@@ -13,31 +13,36 @@ const APP_SHELL = [
 ];
 
 self.addEventListener('install', event => {
+  // Pre-cache all shell assets, THEN skip waiting
   event.waitUntil(
     caches.open(CACHE_NAME)
       .then(cache => cache.addAll(APP_SHELL))
-      .then(() => self.skipWaiting())  // ← inside the chain, after caching is done
+      .then(() => self.skipWaiting())
   );
 });
 
 self.addEventListener('activate', event => {
+  // Delete all old caches that don't match current version
   event.waitUntil(
-    caches.keys().then(keys =>
-      Promise.all(
-        keys
-          .filter(key => key !== CACHE_NAME)
-          .map(key => caches.delete(key))
-      )
-    ).then(() => self.clients.claim())  // ← also chained, not floating
+    caches.keys()
+      .then(keys => Promise.all(
+        keys.filter(key => key !== CACHE_NAME).map(key => caches.delete(key))
+      ))
+      .then(() => self.clients.claim()) // Take control of all open tabs immediately
   );
+});
+
+// ← NEW: respond to skip waiting message from the page
+self.addEventListener('message', event => {
+  if (event.data?.type === 'SKIP_WAITING') {
+    self.skipWaiting();
+  }
 });
 
 self.addEventListener('fetch', event => {
   if (event.request.method !== 'GET') return;
 
   const requestUrl = new URL(event.request.url);
-
-  // Only handle requests within this app's scope
   if (requestUrl.origin !== self.location.origin || !requestUrl.pathname.startsWith(APP_BASE)) {
     return;
   }
@@ -46,7 +51,7 @@ self.addEventListener('fetch', event => {
     caches.match(event.request).then(cachedResponse => {
       if (cachedResponse) return cachedResponse;
 
-      // For navigate requests that miss the cache, serve index.html (SPA fallback)
+      // SPA fallback: any missed navigation → serve index.html
       if (event.request.mode === 'navigate') {
         return caches.match(`${APP_BASE}index.html`);
       }
@@ -57,16 +62,13 @@ self.addEventListener('fetch', event => {
           caches.open(CACHE_NAME).then(cache => cache.put(event.request, responseCopy));
           return networkResponse;
         })
-        .catch(() => {
-          return new Response('', { status: 504, statusText: 'Offline' });
-        });
+        .catch(() => new Response('', { status: 504, statusText: 'Offline' }));
     })
   );
 });
 
 self.addEventListener('notificationclick', event => {
   event.notification.close();
-
   event.waitUntil(
     clients.matchAll({ type: 'window', includeUncontrolled: true }).then(clientList => {
       for (const client of clientList) {
@@ -74,10 +76,7 @@ self.addEventListener('notificationclick', event => {
           return client.focus();
         }
       }
-      if (clients.openWindow) {
-        return clients.openWindow(APP_BASE);
-      }
-      return undefined;
+      if (clients.openWindow) return clients.openWindow(APP_BASE);
     })
   );
 });

@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <script>
+    // GitHub Pages 404 → redirect to app root, preserving the path in the hash
+    // so the SW and app router can handle it
+    const path = window.location.pathname.replace('/time-audit-pwa', '') || '/';
+    window.location.replace('/time-audit-pwa/' + (path !== '/' ? '#' + path : ''));
+  </script>
+</head>
+<body></body>
+</html>
