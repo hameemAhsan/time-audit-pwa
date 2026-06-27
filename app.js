@@ -3,7 +3,7 @@
 
   const STORAGE_KEY = 'timeAuditPwa.v1';
   const LEGACY_KEY = 'timeAuditPwa';
-  const APP_VERSION = '1.0.0';
+  const APP_VERSION = '1.0.1';
   const REMINDER_SCAN_MS = 30 * 1000;
 
   const DEFAULT_CATEGORY_DATA = [
@@ -334,25 +334,24 @@
   function initPwa() {
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker.register('./service-worker.js').then(registration => {
-
-        // If a new SW is already waiting (e.g. page was open during deploy), activate it now
+        // If a newer service worker is already waiting, activate it now.
         if (registration.waiting) {
           registration.waiting.postMessage({ type: 'SKIP_WAITING' });
         }
 
-        // If a new SW installs while the page is open, tell it to activate immediately
+        // If a newer service worker is found while the app is open, activate it now.
         registration.addEventListener('updatefound', () => {
           const newWorker = registration.installing;
+          if (!newWorker) return;
           newWorker.addEventListener('statechange', () => {
             if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
               newWorker.postMessage({ type: 'SKIP_WAITING' });
             }
           });
         });
-
       }).catch(console.error);
 
-      // When the active SW changes, reload once so the new SW serves fresh assets
+      // Reload once when the new service worker takes control, so users get the fresh app.js.
       let refreshing = false;
       navigator.serviceWorker.addEventListener('controllerchange', () => {
         if (!refreshing) {
@@ -368,10 +367,11 @@
       const installBtn = $('#installBtn');
       installBtn.hidden = false;
       installBtn.onclick = async () => {
-        installBtn.hidden = true;
         if (!state.deferredInstallPrompt) return;
+        installBtn.hidden = true;
         state.deferredInstallPrompt.prompt();
-        await state.deferredInstallPrompt.userChoice;
+        const choice = await state.deferredInstallPrompt.userChoice.catch(() => null);
+        if (choice && choice.outcome !== 'accepted') installBtn.hidden = false;
         state.deferredInstallPrompt = null;
       };
     });
@@ -718,19 +718,20 @@
     const preset = state.addPreset;
     const latestLog = getLogsByDate(todayISO()).sort((a, b) => timeToMinutes(b.endTime) - timeToMinutes(a.endTime))[0];
     const defaultActivity = state.data.activities[0];
-    // Sanitize a time string for use in <input type="time"> (valid range: 00:00–23:59).
-    // "24:00" and any out-of-range value are clamped so Android Chrome shows the Set button.
-    function safeTimeInput(t, fallback) {
-      if (!t || typeof t !== 'string') return fallback;
-      const mins = timeToMinutes(t);
-      if (!isFinite(mins)) return fallback;
-      return minutesToTime(Math.min(mins, 1439)); // clamp 24:00 → 23:59
+
+    // Keep <input type="time"> values inside Android Chrome's valid range: 00:00–23:59.
+    // This prevents 24:00/invalid values from breaking the native time picker.
+    function safeTimeInput(timeValue, fallback) {
+      const minutes = timeToMinutes(String(timeValue || ''));
+      if (!Number.isFinite(minutes)) return fallback;
+      return minutesToTime(Math.min(minutes, 1439));
     }
 
+    const startFallback = safeTimeInput(latestLog?.endTime, '09:00');
     const formValues = editing || {
       date: preset?.date || todayISO(),
-      startTime: preset ? minutesToTime(preset.start) : safeTimeInput(latestLog?.endTime, '09:00'),
-      endTime: preset ? minutesToTime(preset.end) : minutesToTime(Math.min(1439, timeToMinutes(safeTimeInput(latestLog?.endTime, '09:00')) + 60)),
+      startTime: preset ? minutesToTime(Math.min(Number(preset.start) || 0, 1439)) : startFallback,
+      endTime: preset ? minutesToTime(Math.min(Number(preset.end) || 0, 1439)) : minutesToTime(Math.min(1439, timeToMinutes(startFallback) + 60)),
       activityId: defaultActivity?.id || '',
       categoryId: defaultActivity?.defaultCategoryId || state.data.categories[0]?.id || '',
       productivityRating: 3,
@@ -928,7 +929,7 @@
     $('[name="note"]').value = previous.note || '';
     const prevDuration = Math.max(15, previous.durationMinutes || 60);
     const start = timeToMinutes(previous.endTime);
-    const end = Math.min(24 * 60, start + prevDuration);
+    const end = Math.min(1439, start + prevDuration);
     $('#startTime').value = minutesToTime(start);
     $('#endTime').value = minutesToTime(end);
     validateActivityForm();
@@ -1500,4 +1501,1284 @@
     ctx.font = '700 14px system-ui';
     ctx.textAlign = 'right';
     for (let i = 0; i <= 4; i++) {
-      cons
+      const y = margin.top + plotH - plotH * i / 4;
+      const value = maxValue * i / 4;
+      ctx.beginPath();
+      ctx.moveTo(margin.left, y);
+      ctx.lineTo(margin.left + plotW, y);
+      ctx.stroke();
+      ctx.fillText(formatDurationCompact(value), margin.left - 8, y + 5);
+    }
+  }
+
+  function drawLegend(ctx, items, width, colors) {
+    let x = 18;
+    const y = 18;
+    ctx.font = '800 14px system-ui';
+    items.forEach(item => {
+      ctx.fillStyle = item.color;
+      ctx.beginPath();
+      ctx.arc(x + 6, y, 6, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = colors.text;
+      ctx.fillText(truncate(item.label, 16), x + 18, y + 5);
+      x += Math.min(180, 44 + item.label.length * 8);
+      if (x > width - 140) x = width - 140;
+    });
+  }
+
+  function roundedRect(ctx, x, y, w, h, r) {
+    const radius = Math.min(r, Math.abs(w) / 2, Math.abs(h) / 2);
+    ctx.beginPath();
+    ctx.moveTo(x + radius, y);
+    ctx.lineTo(x + w - radius, y);
+    ctx.quadraticCurveTo(x + w, y, x + w, y + radius);
+    ctx.lineTo(x + w, y + h - radius);
+    ctx.quadraticCurveTo(x + w, y + h, x + w - radius, y + h);
+    ctx.lineTo(x + radius, y + h);
+    ctx.quadraticCurveTo(x, y + h, x, y + h - radius);
+    ctx.lineTo(x, y + radius);
+    ctx.quadraticCurveTo(x, y, x + radius, y);
+    ctx.closePath();
+  }
+
+  function dashedLine(ctx, x1, y1, x2, y2, color) {
+    ctx.save();
+    ctx.setLineDash([6, 5]);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(x1, y1);
+    ctx.lineTo(x2, y2);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawPolygon(ctx, sides, center, radius, stroke, fill) {
+    ctx.beginPath();
+    for (let i = 0; i < sides; i++) {
+      const angle = -Math.PI / 2 + (Math.PI * 2 * i / sides);
+      const x = center.x + Math.cos(angle) * radius;
+      const y = center.y + Math.sin(angle) * radius;
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }
+    ctx.closePath();
+    if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+    ctx.strokeStyle = stroke;
+    ctx.stroke();
+  }
+
+  function renderSettingsScreen() {
+    return `
+      <section class="stack">
+        <article class="card hero stack-sm">
+          <p class="eyebrow">Local-first controls</p>
+          <h2>Settings, Categories, Activities & Backup</h2>
+          <p class="muted">Everything is stored in this browser only. Export JSON backup before clearing browser data or changing phone.</p>
+        </article>
+
+        <article class="card stack-sm">
+          <h2>App Settings</h2>
+          <form id="settingsForm" class="form-grid">
+            <label>Theme
+              <select name="theme">
+                ${['system','light','dark'].map(value => `<option value="${value}" ${state.data.settings.theme === value ? 'selected' : ''}>${capitalize(value)}</option>`).join('')}
+              </select>
+            </label>
+            <div class="form-row">
+              <label>Day start time<input name="dayStartTime" value="${escapeHtml(state.data.settings.dayStartTime)}" placeholder="00:00"></label>
+              <label>Day end time<input name="dayEndTime" value="${escapeHtml(state.data.settings.dayEndTime)}" placeholder="24:00"></label>
+            </div>
+            <label>Streak minimum logged minutes
+              <select name="streakMinimumLoggedMinutes">
+                ${[[480,'8 hours'],[720,'12 hours'],[960,'16 hours'],[1200,'20 hours']].map(([value,label]) => `<option value="${value}" ${Number(state.data.settings.streakMinimumLoggedMinutes) === value ? 'selected' : ''}>${label}</option>`).join('')}
+              </select>
+            </label>
+            <label>Custom streak minimum minutes<input name="customStreakMinimumLoggedMinutes" type="number" min="1" max="1440" value="${state.data.settings.streakMinimumLoggedMinutes}"></label>
+
+            <h3>Notifications</h3>
+            <label class="check-card"><input type="checkbox" name="notificationsEnabled" ${state.data.settings.notificationsEnabled ? 'checked' : ''}> Enable notification-ready reminders</label>
+            <label class="check-card"><input type="checkbox" name="progressReminderEnabled" ${state.data.settings.progressReminderEnabled ? 'checked' : ''}> Progress reminders</label>
+            <label class="check-card"><input type="checkbox" name="exportReminderEnabled" ${state.data.settings.exportReminderEnabled ? 'checked' : ''}> Export reminders</label>
+            <label class="check-card"><input type="checkbox" name="motivationalReminderEnabled" ${state.data.settings.motivationalReminderEnabled ? 'checked' : ''}> Motivational reminders</label>
+            <label>Progress reminder times<input name="progressReminderTimes" value="${state.data.settings.progressReminderTimes.join(', ')}" placeholder="10:00, 15:00, 20:00"></label>
+            <label>Export reminder times<input name="exportReminderTimes" value="${state.data.settings.exportReminderTimes.join(', ')}" placeholder="22:30"></label>
+            <label>Motivational reminder times<input name="motivationalReminderTimes" value="${state.data.settings.motivationalReminderTimes.join(', ')}" placeholder="12:30, 18:30"></label>
+
+            <h3>Custom Notification Messages</h3>
+            <label>Progress messages<textarea name="progressMessages">${escapeHtml(state.data.settings.customNotificationMessages.progress.join('\n'))}</textarea></label>
+            <label>Export messages<textarea name="exportMessages">${escapeHtml(state.data.settings.customNotificationMessages.export.join('\n'))}</textarea></label>
+            <label>Motivational messages<textarea name="motivationalMessages">${escapeHtml(state.data.settings.customNotificationMessages.motivational.join('\n'))}</textarea></label>
+
+            <h3>Default Image Export Privacy</h3>
+            ${renderExportPrivacyChecks(state.data.settings.defaultExportPrivacySettings)}
+
+            <button class="btn full" type="submit">Save Settings</button>
+            <button class="btn secondary full" type="button" data-action="request-notifications">Allow Notifications</button>
+            <button class="btn secondary full" type="button" data-action="test-notification">Test Notification</button>
+          </form>
+        </article>
+
+        <article class="card stack-sm">
+          <h2>Categories</h2>
+          <form id="categoryForm" class="form-grid">
+            <div class="form-row three">
+              <label>Name<input name="name" placeholder="Category name" required></label>
+              <label>Color<input name="color" type="color" value="#2563eb"></label>
+              <label>Icon<input name="icon" placeholder="📘" maxlength="3"></label>
+            </div>
+            <label class="check-card"><input type="checkbox" name="countsAsStudyTime"> Counts as study time</label>
+            <button class="btn secondary full" type="submit">Add Category</button>
+          </form>
+          <div class="stack-sm">
+            ${state.data.categories.map(category => renderCategoryEditor(category)).join('')}
+          </div>
+        </article>
+
+        <article class="card stack-sm">
+          <h2>Activity Presets</h2>
+          <form id="activityPresetForm" class="form-grid">
+            <label>Activity name<input name="name" placeholder="Example: MBA Study" required></label>
+            <label>Default category
+              <select name="defaultCategoryId" required>${state.data.categories.map(category => `<option value="${category.id}">${escapeHtml(category.icon)} ${escapeHtml(category.name)}</option>`).join('')}</select>
+            </label>
+            <button class="btn secondary full" type="submit">Add Activity Preset</button>
+          </form>
+          <div class="stack-sm">
+            ${state.data.activities.map(activity => renderActivityEditor(activity)).join('')}
+          </div>
+        </article>
+
+        <article class="card stack-sm">
+          <h2>Backup & Restore</h2>
+          <p class="small muted">JSON backup is for app restore. CSV/image exports are for accountability sharing.</p>
+          <div class="grid-2">
+            <button class="btn secondary" data-action="download-json">Export JSON Backup</button>
+            <label class="btn secondary" for="jsonImportInput">Import JSON</label>
+          </div>
+          <input id="jsonImportInput" type="file" accept="application/json,.json" hidden>
+          <button class="btn secondary full" data-action="reset-demo">Add Demo Data</button>
+          <button class="btn danger full" data-action="clear-all">Clear All Local Data</button>
+        </article>
+      </section>
+    `;
+  }
+
+  function renderExportPrivacyChecks(settings) {
+    const entries = [
+      ['includeNotes', 'Include notes'],
+      ['includeReflection', 'Include daily reflection'],
+      ['includeTimeline', 'Include full timeline'],
+      ['summaryOnly', 'Summary only'],
+      ['includeProductivity', 'Include productivity rating']
+    ];
+    return `<div class="check-grid">${entries.map(([name, label]) => `<label class="check-card"><input type="checkbox" name="${name}" ${settings[name] ? 'checked' : ''}> ${label}</label>`).join('')}</div>`;
+  }
+
+  function renderCategoryEditor(category) {
+    const targets = category.targets || [];
+    return `<div class="card stack-sm" style="box-shadow:none;background:var(--surface-2);">
+      <div class="between">
+        <div>
+          <strong><span class="color-dot" style="--dot:${escapeHtml(category.color)}"></span> ${escapeHtml(category.icon)} ${escapeHtml(category.name)}</strong>
+          <p class="small muted">${category.countsAsStudyTime ? 'Counts as study time' : 'Not study time'} · ${targets.filter(t => t.active).length} active target(s)</p>
+        </div>
+        <button class="btn danger" data-action="delete-category" data-id="${category.id}">Delete</button>
+      </div>
+      <div class="form-grid">
+        <div class="form-row three">
+          <label>Name<input id="catName-${category.id}" value="${escapeHtml(category.name)}"></label>
+          <label>Color<input id="catColor-${category.id}" type="color" value="${escapeHtml(category.color)}"></label>
+          <label>Icon<input id="catIcon-${category.id}" value="${escapeHtml(category.icon || '')}" maxlength="3"></label>
+        </div>
+        <label class="check-card"><input id="catStudy-${category.id}" type="checkbox" ${category.countsAsStudyTime ? 'checked' : ''}> Counts as study time</label>
+        <button class="btn secondary full" data-action="update-category" data-id="${category.id}">Save Category Changes</button>
+      </div>
+      <div class="table-lite">
+        ${targets.length ? targets.map(target => `<div class="table-row"><span>${target.type} · ${target.period} · ${formatDuration(target.durationMinutes)} ${target.active ? '' : '(off)'}</span><button class="btn danger" data-action="delete-target" data-category-id="${category.id}" data-id="${target.id}">Remove</button></div>`).join('') : '<p class="small muted">No target set.</p>'}
+      </div>
+      <button class="btn secondary full" data-action="add-target" data-id="${category.id}">Add Target</button>
+    </div>`;
+  }
+
+  function renderActivityEditor(activity) {
+    return `<div class="card stack-sm" style="box-shadow:none;background:var(--surface-2);">
+      <div class="form-grid">
+        <label>Activity name<input id="actName-${activity.id}" value="${escapeHtml(activity.name)}"></label>
+        <label>Default category
+          <select id="actCategory-${activity.id}">
+            ${state.data.categories.map(category => `<option value="${category.id}" ${activity.defaultCategoryId === category.id ? 'selected' : ''}>${escapeHtml(category.icon)} ${escapeHtml(category.name)}</option>`).join('')}
+          </select>
+        </label>
+        <div class="grid-2">
+          <button class="btn secondary" data-action="update-activity" data-id="${activity.id}">Save Changes</button>
+          <button class="btn danger" data-action="delete-activity" data-id="${activity.id}">Delete</button>
+        </div>
+      </div>
+    </div>`;
+  }
+
+  function saveCategory(event) {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const name = String(form.get('name') || '').trim();
+    if (!name) return;
+    if (state.data.categories.some(c => c.name.toLowerCase() === name.toLowerCase())) {
+      toast('Category already exists.');
+      return;
+    }
+    const now = new Date().toISOString();
+    state.data.categories.push({
+      id: uid(),
+      name,
+      color: form.get('color') || '#64748b',
+      icon: String(form.get('icon') || '•').trim() || '•',
+      countsAsStudyTime: form.get('countsAsStudyTime') === 'on',
+      targets: [],
+      isDefault: false,
+      createdAt: now,
+      updatedAt: now
+    });
+    saveData(true);
+    render();
+  }
+
+  function updateCategory(id) {
+    const category = getCategory(id);
+    if (!category) return;
+    const name = document.getElementById(`catName-${id}`)?.value.trim();
+    const color = document.getElementById(`catColor-${id}`)?.value || category.color;
+    const icon = document.getElementById(`catIcon-${id}`)?.value.trim() || '•';
+    const countsAsStudyTime = document.getElementById(`catStudy-${id}`)?.checked || false;
+    if (!name) return toast('Category name cannot be empty.');
+    const duplicate = state.data.categories.some(c => c.id !== id && c.name.toLowerCase() === name.toLowerCase());
+    if (duplicate) return toast('Another category already has this name.');
+    category.name = name;
+    category.color = color;
+    category.icon = icon;
+    category.countsAsStudyTime = countsAsStudyTime;
+    category.updatedAt = new Date().toISOString();
+    saveData(true);
+    render();
+  }
+
+  function deleteCategory(id) {
+    const category = getCategory(id);
+    if (!category) return;
+    const used = state.data.logs.some(log => log.categoryId === id) || state.data.activities.some(activity => activity.defaultCategoryId === id);
+    if (used) {
+      toast('Category is used by logs or activities, so it cannot be deleted safely.');
+      return;
+    }
+    if (!confirm(`Delete category ${category.name}?`)) return;
+    state.data.categories = state.data.categories.filter(c => c.id !== id);
+    saveData(true);
+    render();
+  }
+
+  function addTarget(categoryId) {
+    const category = getCategory(categoryId);
+    if (!category) return;
+    const period = prompt('Target period: daily, weekly, or monthly', 'daily');
+    if (!['daily','weekly','monthly'].includes(period)) return toast('Invalid target period.');
+    const type = prompt('Target type: minimum or maximum', 'minimum');
+    if (!['minimum','maximum'].includes(type)) return toast('Invalid target type.');
+    const minutes = Number(prompt('Target duration in minutes. Example: 240 for 4 hours', '240'));
+    if (!Number.isFinite(minutes) || minutes <= 0) return toast('Invalid target duration.');
+    category.targets = category.targets || [];
+    category.targets.push({ id: uid(), categoryId, period, type, durationMinutes: Math.round(minutes), active: true });
+    category.updatedAt = new Date().toISOString();
+    saveData(true);
+    render();
+  }
+
+  function deleteTarget(categoryId, targetId) {
+    const category = getCategory(categoryId);
+    if (!category) return;
+    category.targets = (category.targets || []).filter(t => t.id !== targetId);
+    saveData(true);
+    render();
+  }
+
+  function saveActivityPreset(event) {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const name = String(form.get('name') || '').trim();
+    if (!name) return;
+    if (state.data.activities.some(a => a.name.toLowerCase() === name.toLowerCase())) {
+      toast('Activity already exists.');
+      return;
+    }
+    const now = new Date().toISOString();
+    state.data.activities.push({
+      id: uid(),
+      name,
+      defaultCategoryId: form.get('defaultCategoryId'),
+      isDefault: false,
+      createdAt: now,
+      updatedAt: now
+    });
+    saveData(true);
+    render();
+  }
+
+  function updateActivityPreset(id) {
+    const activity = getActivity(id);
+    if (!activity) return;
+    const name = document.getElementById(`actName-${id}`)?.value.trim();
+    const defaultCategoryId = document.getElementById(`actCategory-${id}`)?.value;
+    if (!name) return toast('Activity name cannot be empty.');
+    const duplicate = state.data.activities.some(a => a.id !== id && a.name.toLowerCase() === name.toLowerCase());
+    if (duplicate) return toast('Another activity already has this name.');
+    activity.name = name;
+    activity.defaultCategoryId = defaultCategoryId;
+    activity.updatedAt = new Date().toISOString();
+    saveData(true);
+    render();
+  }
+
+  function deleteActivityPreset(id) {
+    const activity = getActivity(id);
+    if (!activity) return;
+    if (state.data.logs.some(log => log.activityId === id)) {
+      toast('Activity is used by logs, so it cannot be deleted safely.');
+      return;
+    }
+    if (!confirm(`Delete activity preset ${activity.name}?`)) return;
+    state.data.activities = state.data.activities.filter(a => a.id !== id);
+    saveData(true);
+    render();
+  }
+
+  function saveSettings(event) {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const customMinutes = Number(form.get('customStreakMinimumLoggedMinutes'));
+    const selectedPreset = Number(form.get('streakMinimumLoggedMinutes'));
+    state.data.settings.theme = form.get('theme');
+    state.data.settings.dayStartTime = normalizeDayWindowTime(form.get('dayStartTime')) || '00:00';
+    state.data.settings.dayEndTime = normalizeDayWindowTime(form.get('dayEndTime')) || '24:00';
+    state.data.settings.streakMinimumLoggedMinutes = Number.isFinite(customMinutes) && customMinutes > 0 ? Math.round(customMinutes) : selectedPreset;
+    state.data.settings.notificationsEnabled = form.get('notificationsEnabled') === 'on';
+    state.data.settings.progressReminderEnabled = form.get('progressReminderEnabled') === 'on';
+    state.data.settings.exportReminderEnabled = form.get('exportReminderEnabled') === 'on';
+    state.data.settings.motivationalReminderEnabled = form.get('motivationalReminderEnabled') === 'on';
+    state.data.settings.progressReminderTimes = parseTimeList(form.get('progressReminderTimes'));
+    state.data.settings.exportReminderTimes = parseTimeList(form.get('exportReminderTimes'));
+    state.data.settings.motivationalReminderTimes = parseTimeList(form.get('motivationalReminderTimes'));
+    state.data.settings.customNotificationMessages = {
+      progress: splitLines(form.get('progressMessages')),
+      export: splitLines(form.get('exportMessages')),
+      motivational: splitLines(form.get('motivationalMessages'))
+    };
+    state.data.settings.defaultExportPrivacySettings = {
+      includeNotes: form.get('includeNotes') === 'on',
+      includeReflection: form.get('includeReflection') === 'on',
+      includeTimeline: form.get('includeTimeline') === 'on',
+      summaryOnly: form.get('summaryOnly') === 'on',
+      includeProductivity: form.get('includeProductivity') === 'on'
+    };
+    saveData(true);
+    applyTheme();
+    render();
+  }
+
+  function applyTheme() {
+    const theme = state.data.settings.theme;
+    const prefersDark = window.matchMedia?.('(prefers-color-scheme: dark)').matches;
+    document.documentElement.dataset.theme = theme === 'system' ? (prefersDark ? 'dark' : 'light') : theme;
+    const meta = $('meta[name="theme-color"]');
+    if (meta) meta.content = document.documentElement.dataset.theme === 'dark' ? '#0c0f14' : '#111827';
+  }
+
+  function showExportModal(scope) {
+    const settings = state.data.settings.defaultExportPrivacySettings;
+    const title = scope === 'today' ? 'Export Today as Image' : 'Export Report as Image';
+    openModal(title, `
+      <form id="exportOptionsForm" class="form-grid">
+        <input type="hidden" name="scope" value="${scope}">
+        ${renderExportPrivacyChecks(settings)}
+        <button class="btn full" type="button" data-action="export-confirm">Download Image Report</button>
+      </form>
+    `);
+  }
+
+  function exportReportImage(formData) {
+    const scope = formData.get('scope');
+    const options = {
+      includeNotes: formData.get('includeNotes') === 'on',
+      includeReflection: formData.get('includeReflection') === 'on',
+      includeTimeline: formData.get('includeTimeline') === 'on',
+      summaryOnly: formData.get('summaryOnly') === 'on',
+      includeProductivity: formData.get('includeProductivity') === 'on'
+    };
+    const range = scope === 'today' ? { start: todayISO(), end: todayISO() } : getSelectedRange();
+    const canvas = buildReportCanvas(range.start, range.end, options);
+    canvas.toBlob(blob => {
+      if (!blob) return toast('Could not create image.');
+      downloadBlob(blob, `time-audit-${range.start}-to-${range.end}.png`);
+      toast('Image report downloaded.');
+    }, 'image/png', 0.95);
+  }
+
+  function buildReportCanvas(start, end, options) {
+    const days = daysBetween(start, end) + 1;
+    const logs = getLogsInRange(start, end).sort((a, b) => `${a.date} ${a.startTime}`.localeCompare(`${b.date} ${b.startTime}`));
+    const summary = getRangeSummary(start, end);
+    const categoryTotals = getCategoryTotals(logs).slice(0, 5);
+    const reflection = days === 1 ? getReflection(start) : null;
+    const width = 1080;
+    let height = 920;
+    if (options.includeReflection && reflection && !options.summaryOnly) height += 240;
+    if (options.includeTimeline && !options.summaryOnly) height += Math.min(760, logs.length * 92 + 120);
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+
+    ctx.fillStyle = '#f7f4ef';
+    ctx.fillRect(0, 0, width, height);
+    ctx.fillStyle = '#ffffff';
+    roundedRect(ctx, 52, 52, width - 104, height - 104, 38);
+    ctx.fill();
+
+    let y = 112;
+    ctx.fillStyle = '#d97706';
+    ctx.font = '900 28px system-ui, sans-serif';
+    ctx.fillText('TIME AUDIT REPORT', 96, y);
+    y += 54;
+    ctx.fillStyle = '#111827';
+    ctx.font = '1000 48px system-ui, sans-serif';
+    ctx.fillText(formatDateRange(start, end), 96, y);
+    y += 42;
+    ctx.fillStyle = '#6b7280';
+    ctx.font = '700 24px system-ui, sans-serif';
+    ctx.fillText('Local PWA accountability report', 96, y);
+    y += 54;
+
+    const stats = [
+      ['Logged', formatDuration(summary.loggedMinutes)],
+      ['Unlogged', formatDuration(summary.unloggedMinutes)],
+      ['Study', formatDuration(summary.studyMinutes)],
+      ['Avg Productivity', options.includeProductivity ? (summary.avgProductivity ? `${summary.avgProductivity.toFixed(1)}/5` : '—') : 'Hidden'],
+      ['Top Category', summary.topCategory || 'None'],
+      ['Current Streak', `${getStreak().current} days`]
+    ];
+    drawExportStats(ctx, stats, 96, y);
+    y += 264;
+
+    ctx.fillStyle = '#111827';
+    ctx.font = '950 32px system-ui, sans-serif';
+    ctx.fillText('Top Categories', 96, y);
+    y += 34;
+    if (categoryTotals.length) {
+      categoryTotals.forEach(row => {
+        ctx.fillStyle = row.color;
+        ctx.beginPath();
+        ctx.arc(108, y + 10, 10, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#111827';
+        ctx.font = '850 25px system-ui, sans-serif';
+        ctx.fillText(`${row.name}: ${formatDuration(row.minutes)}`, 132, y + 18);
+        y += 42;
+      });
+    } else {
+      ctx.fillStyle = '#6b7280';
+      ctx.font = '700 24px system-ui, sans-serif';
+      ctx.fillText('No category data yet.', 96, y + 18);
+      y += 42;
+    }
+
+    const targets = getTargetRowsForRange(start, end).slice(0, 4);
+    y += 30;
+    ctx.fillStyle = '#111827';
+    ctx.font = '950 32px system-ui, sans-serif';
+    ctx.fillText('Target Progress', 96, y);
+    y += 42;
+    if (targets.length) {
+      targets.forEach(row => {
+        const status = row.type === 'minimum'
+          ? (row.actual >= row.target ? 'Reached' : `${formatDuration(row.target - row.actual)} left`)
+          : (row.actual <= row.target ? 'Within limit' : `${formatDuration(row.actual - row.target)} over`);
+        ctx.fillStyle = '#111827';
+        ctx.font = '800 24px system-ui, sans-serif';
+        ctx.fillText(`${row.category.name}: ${formatDuration(row.actual)} / ${formatDuration(row.target)} · ${status}`, 96, y);
+        y += 36;
+      });
+    } else {
+      ctx.fillStyle = '#6b7280';
+      ctx.font = '700 24px system-ui, sans-serif';
+      ctx.fillText('No active targets in this range.', 96, y);
+      y += 36;
+    }
+
+    if (options.includeReflection && reflection && !options.summaryOnly) {
+      y += 46;
+      ctx.fillStyle = '#111827';
+      ctx.font = '950 32px system-ui, sans-serif';
+      ctx.fillText('Reflection', 96, y);
+      y += 40;
+      const reflectionText = [
+        reflection.dailyNote && `Note: ${reflection.dailyNote}`,
+        reflection.wentWell && `Went well: ${reflection.wentWell}`,
+        reflection.wastedTime && `Wasted time: ${reflection.wastedTime}`,
+        reflection.improveTomorrow && `Improve: ${reflection.improveTomorrow}`,
+        reflection.tomorrowPriority && `Priority: ${reflection.tomorrowPriority}`
+      ].filter(Boolean).join('  ');
+      y = drawWrappedText(ctx, reflectionText || 'No reflection written.', 96, y, 880, 30, '#374151', '700 24px system-ui, sans-serif');
+    }
+
+    if (options.includeTimeline && !options.summaryOnly) {
+      y += 48;
+      ctx.fillStyle = '#111827';
+      ctx.font = '950 32px system-ui, sans-serif';
+      ctx.fillText('Timeline Summary', 96, y);
+      y += 42;
+      logs.slice(0, 10).forEach(log => {
+        const text = `${log.date} · ${log.startTime}–${log.endTime} · ${log.activityNameSnapshot} · ${log.categoryNameSnapshot}${options.includeProductivity ? ` · ${log.productivityRating}/5` : ''}${options.includeNotes && log.note ? ` · ${truncate(log.note, 50)}` : ''}`;
+        y = drawWrappedText(ctx, text, 96, y, 880, 30, '#374151', '700 23px system-ui, sans-serif');
+        y += 10;
+      });
+      if (logs.length > 10) {
+        ctx.fillStyle = '#6b7280';
+        ctx.font = '750 22px system-ui, sans-serif';
+        ctx.fillText(`+ ${logs.length - 10} more logs in CSV backup/export.`, 96, y);
+      }
+    }
+
+    ctx.fillStyle = '#9ca3af';
+    ctx.font = '700 20px system-ui, sans-serif';
+    ctx.fillText(`Generated ${new Date().toLocaleString()} · Data stays local`, 96, height - 90);
+    return canvas;
+  }
+
+  function drawExportStats(ctx, stats, x, y) {
+    const cardW = 280;
+    const cardH = 96;
+    const gap = 18;
+    stats.forEach(([label, value], index) => {
+      const col = index % 3;
+      const row = Math.floor(index / 3);
+      const cx = x + col * (cardW + gap);
+      const cy = y + row * (cardH + gap);
+      ctx.fillStyle = '#f1eee8';
+      roundedRect(ctx, cx, cy, cardW, cardH, 22);
+      ctx.fill();
+      ctx.fillStyle = '#6b7280';
+      ctx.font = '850 18px system-ui, sans-serif';
+      ctx.fillText(label.toUpperCase(), cx + 22, cy + 34);
+      ctx.fillStyle = '#111827';
+      ctx.font = '1000 28px system-ui, sans-serif';
+      ctx.fillText(truncate(String(value), 17), cx + 22, cy + 72);
+    });
+  }
+
+  function drawWrappedText(ctx, text, x, y, maxWidth, lineHeight, color, font) {
+    ctx.fillStyle = color;
+    ctx.font = font;
+    const words = String(text || '').split(/\s+/);
+    let line = '';
+    words.forEach(word => {
+      const test = line ? `${line} ${word}` : word;
+      if (ctx.measureText(test).width > maxWidth && line) {
+        ctx.fillText(line, x, y);
+        line = word;
+        y += lineHeight;
+      } else {
+        line = test;
+      }
+    });
+    if (line) {
+      ctx.fillText(line, x, y);
+      y += lineHeight;
+    }
+    return y;
+  }
+
+  function downloadCsvForCurrentRange() {
+    const range = getSelectedRange();
+    const logs = getLogsInRange(range.start, range.end).sort((a, b) => `${a.date} ${a.startTime}`.localeCompare(`${b.date} ${b.startTime}`));
+    const columns = ['Date', 'Start Time', 'End Time', 'Duration Minutes', 'Activity', 'Category', 'Productivity Rating', 'Note'];
+    const rows = logs.map(log => [
+      log.date,
+      log.startTime,
+      log.endTime,
+      log.durationMinutes,
+      log.activityNameSnapshot,
+      log.categoryNameSnapshot,
+      log.productivityRating,
+      log.note || ''
+    ]);
+    const csv = [columns, ...rows].map(row => row.map(csvEscape).join(',')).join('\n');
+    downloadBlob(new Blob([csv], { type: 'text/csv;charset=utf-8' }), `time-audit-${range.start}-to-${range.end}.csv`);
+    toast('CSV export downloaded.');
+  }
+
+  function downloadJsonBackup() {
+    const payload = {
+      exportedAt: new Date().toISOString(),
+      app: 'Time Audit PWA',
+      version: APP_VERSION,
+      data: state.data
+    };
+    downloadBlob(new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }), `time-audit-backup-${todayISO()}.json`);
+    toast('JSON backup downloaded.');
+  }
+
+  function importJsonBackup(event) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const parsed = JSON.parse(reader.result);
+        const imported = parsed.data || parsed;
+        if (!Array.isArray(imported.categories) || !Array.isArray(imported.activities) || !Array.isArray(imported.logs)) {
+          throw new Error('Invalid backup shape');
+        }
+        if (!confirm('Importing this backup will replace current local app data. Continue?')) return;
+        state.data = migrateData(imported);
+        saveData(true);
+        applyTheme();
+        render();
+      } catch (error) {
+        console.error(error);
+        toast('Invalid JSON backup file.');
+      } finally {
+        event.target.value = '';
+      }
+    };
+    reader.readAsText(file);
+  }
+
+  function downloadBlob(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  function csvEscape(value) {
+    const str = String(value ?? '');
+    return /[",\n]/.test(str) ? `"${str.replace(/"/g, '""')}"` : str;
+  }
+
+  async function requestNotificationPermission() {
+    if (!('Notification' in window)) {
+      toast('Notifications are not supported in this browser.');
+      return;
+    }
+    const permission = await Notification.requestPermission();
+    if (permission === 'granted') {
+      state.data.settings.notificationsEnabled = true;
+      saveData(true);
+      toast('Notifications allowed.');
+      render();
+    } else {
+      toast('Notification permission was not granted.');
+    }
+  }
+
+  function sendLocalNotification(title, body) {
+    if (!state.data.settings.notificationsEnabled) return;
+    if (!('Notification' in window) || Notification.permission !== 'granted') return;
+    if (navigator.serviceWorker?.ready) {
+      navigator.serviceWorker.ready.then(reg => reg.showNotification(title, {
+        body,
+        icon: 'assets/icon-192.png',
+        badge: 'assets/icon-192.png',
+        tag: `time-audit-${title}`,
+        renotify: false
+      })).catch(() => new Notification(title, { body }));
+    } else {
+      new Notification(title, { body });
+    }
+  }
+
+  function startReminderScan() {
+    setInterval(() => {
+      const settings = state.data.settings;
+      if (!settings.notificationsEnabled) return;
+      const now = new Date();
+      const minuteKey = `${todayISO()} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+      if (state.lastNotificationMinute === minuteKey) return;
+      const time = minuteKey.slice(-5);
+      const jobs = [];
+      if (settings.progressReminderEnabled && settings.progressReminderTimes.includes(time)) jobs.push(['Progress reminder', randomItem(settings.customNotificationMessages.progress)]);
+      if (settings.exportReminderEnabled && settings.exportReminderTimes.includes(time)) jobs.push(['Export reminder', randomItem(settings.customNotificationMessages.export)]);
+      if (settings.motivationalReminderEnabled && settings.motivationalReminderTimes.includes(time)) jobs.push(['Keep going', randomItem(settings.customNotificationMessages.motivational)]);
+      if (jobs.length) {
+        state.lastNotificationMinute = minuteKey;
+        jobs.forEach(([title, body]) => sendLocalNotification(title, body));
+      }
+    }, REMINDER_SCAN_MS);
+  }
+
+  function openModal(title, bodyHtml) {
+    const tpl = $('#modalTemplate');
+    const node = tpl.content.cloneNode(true);
+    node.querySelector('#modalTitle').textContent = title;
+    node.querySelector('#modalBody').innerHTML = bodyHtml;
+    document.body.appendChild(node);
+    document.body.addEventListener('click', modalClickHandler);
+  }
+
+  function modalClickHandler(event) {
+    const action = event.target.closest('[data-action]')?.dataset.action;
+    if (action) {
+      handleAction(action, event);
+      return;
+    }
+    if (event.target.closest('[data-close-modal]') && !event.target.closest('.modal-card')) closeModal();
+    if (event.target.matches('[data-close-modal]')) closeModal();
+  }
+
+  function closeModal() {
+    $$('.modal-backdrop').forEach(node => node.remove());
+    document.body.removeEventListener('click', modalClickHandler);
+  }
+
+  function clearAllData() {
+    if (!confirm('This deletes all local logs, settings, categories, activities, reflections, and targets from this browser. Export JSON backup first if needed. Continue?')) return;
+    localStorage.removeItem(STORAGE_KEY);
+    localStorage.removeItem(LEGACY_KEY);
+    state.data = createDefaultData();
+    saveData(true);
+    applyTheme();
+    navigate('today');
+  }
+
+  function addDemoData() {
+    const date = todayISO();
+    const examples = [
+      ['07:30', '08:15', 'act_eating', 3, 'Breakfast and getting ready.'],
+      ['09:00', '11:00', 'act_studying', 5, 'Focused statistics practice.'],
+      ['11:30', '12:30', 'act_class', 4, 'Class notes and discussion.'],
+      ['14:00', '16:00', 'act_business', 4, 'Srijani product work.'],
+      ['18:00', '19:00', 'act_scrolling', 2, 'Unplanned scrolling.'],
+      ['22:30', '23:15', 'act_planning', 4, 'Planning tomorrow.']
+    ];
+    examples.forEach(([startTime, endTime, activityId, productivityRating, note]) => {
+      const activity = getActivity(activityId);
+      const category = getCategory(activity?.defaultCategoryId);
+      state.data.logs.push({
+        id: uid(),
+        date,
+        startTime,
+        endTime,
+        durationMinutes: timeToMinutes(endTime) - timeToMinutes(startTime),
+        activityId,
+        activityNameSnapshot: activity?.name || 'Activity',
+        categoryId: category?.id || '',
+        categoryNameSnapshot: category?.name || 'Category',
+        productivityRating,
+        note,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      });
+    });
+    saveData(true);
+    navigate('today');
+  }
+
+  function getDaySummary(date) {
+    const logs = getLogsByDate(date);
+    const loggedMinutes = logs.reduce((sum, log) => sum + Number(log.durationMinutes || 0), 0);
+    const windowMinutes = getDayWindowMinutes();
+    const unloggedMinutes = Math.max(0, windowMinutes - loggedMinutes);
+    const studyMinutes = logs.reduce((sum, log) => sum + (getCategory(log.categoryId)?.countsAsStudyTime ? Number(log.durationMinutes || 0) : 0), 0);
+    const avgProductivity = average(logs.map(log => Number(log.productivityRating)).filter(Boolean));
+    const topCategory = getCategoryTotals(logs)[0]?.name || '';
+    const streak = getStreak();
+    return {
+      loggedMinutes,
+      unloggedMinutes,
+      studyMinutes,
+      avgProductivity,
+      topCategory,
+      streak,
+      targetSummary: summarizeTargets(getTargetRowsForPeriod('daily', date, date))
+    };
+  }
+
+  function getRangeSummary(start, end) {
+    const logs = getLogsInRange(start, end);
+    const days = daysBetween(start, end) + 1;
+    const loggedMinutes = logs.reduce((sum, log) => sum + Number(log.durationMinutes || 0), 0);
+    const unloggedMinutes = Math.max(0, getDayWindowMinutes() * days - loggedMinutes);
+    const studyMinutes = logs.reduce((sum, log) => sum + (getCategory(log.categoryId)?.countsAsStudyTime ? Number(log.durationMinutes || 0) : 0), 0);
+    const avgProductivity = average(logs.map(log => Number(log.productivityRating)).filter(Boolean));
+    const topCategory = getCategoryTotals(logs)[0]?.name || '';
+    const topActivity = getActivityTotals(logs)[0]?.name || '';
+    return {
+      loggedMinutes,
+      unloggedMinutes,
+      studyMinutes,
+      avgProductivity,
+      topCategory,
+      topActivity,
+      targetSummary: summarizeTargets(getTargetRowsForRange(start, end))
+    };
+  }
+
+  function getLogsByDate(date) {
+    return state.data.logs.filter(log => log.date === date);
+  }
+
+  function getLogsInRange(start, end) {
+    return state.data.logs.filter(log => log.date >= start && log.date <= end);
+  }
+
+  function getLoggedMinutesByDate(date) {
+    return getLogsByDate(date).reduce((sum, log) => sum + Number(log.durationMinutes || 0), 0);
+  }
+
+  function getCategoryTotals(logs) {
+    const map = new Map();
+    logs.forEach(log => {
+      const category = getCategory(log.categoryId);
+      const key = log.categoryId || log.categoryNameSnapshot;
+      if (!map.has(key)) {
+        map.set(key, {
+          id: log.categoryId,
+          name: category?.name || log.categoryNameSnapshot || 'Unknown',
+          color: category?.color || '#64748b',
+          icon: category?.icon || '•',
+          minutes: 0
+        });
+      }
+      map.get(key).minutes += Number(log.durationMinutes || 0);
+    });
+    return Array.from(map.values()).sort((a, b) => b.minutes - a.minutes);
+  }
+
+  function getActivityTotals(logs) {
+    const map = new Map();
+    logs.forEach(log => {
+      const key = log.activityId || log.activityNameSnapshot;
+      if (!map.has(key)) map.set(key, { id: log.activityId, name: log.activityNameSnapshot || getActivity(log.activityId)?.name || 'Unknown', minutes: 0 });
+      map.get(key).minutes += Number(log.durationMinutes || 0);
+    });
+    return Array.from(map.values()).sort((a, b) => b.minutes - a.minutes);
+  }
+
+  function getCategoryMinutesForRange(categoryId, start, end) {
+    return getLogsInRange(start, end)
+      .filter(log => log.categoryId === categoryId)
+      .reduce((sum, log) => sum + Number(log.durationMinutes || 0), 0);
+  }
+
+  function getActivityMinutesForRange(activityId, start, end) {
+    return getLogsInRange(start, end)
+      .filter(log => log.activityId === activityId)
+      .reduce((sum, log) => sum + Number(log.durationMinutes || 0), 0);
+  }
+
+  function getGapsForDate(date) {
+    const dayStart = timeToMinutes(state.data.settings.dayStartTime || '00:00');
+    const dayEnd = timeToMinutes(state.data.settings.dayEndTime || '24:00');
+    const startWindow = Number.isFinite(dayStart) ? dayStart : 0;
+    const endWindow = Number.isFinite(dayEnd) ? dayEnd : 24 * 60;
+    const intervals = getLogsByDate(date)
+      .map(log => ({ start: Math.max(startWindow, timeToMinutes(log.startTime)), end: Math.min(endWindow, timeToMinutes(log.endTime)) }))
+      .filter(item => item.end > item.start)
+      .sort((a, b) => a.start - b.start);
+
+    const merged = [];
+    intervals.forEach(interval => {
+      const last = merged.at(-1);
+      if (!last || interval.start > last.end) merged.push({ ...interval });
+      else last.end = Math.max(last.end, interval.end);
+    });
+
+    const gaps = [];
+    let cursor = startWindow;
+    merged.forEach(interval => {
+      if (interval.start > cursor) gaps.push({ date, start: cursor, end: interval.start });
+      cursor = Math.max(cursor, interval.end);
+    });
+    if (cursor < endWindow) gaps.push({ date, start: cursor, end: endWindow });
+    return gaps.filter(gap => gap.end - gap.start >= 1);
+  }
+
+  function findOverlap(date, start, end, excludeId = null) {
+    if (!date || !Number.isFinite(start) || !Number.isFinite(end)) return [];
+    return getLogsByDate(date).filter(log => {
+      if (excludeId && log.id === excludeId) return false;
+      const s = timeToMinutes(log.startTime);
+      const e = timeToMinutes(log.endTime);
+      return start < e && end > s;
+    });
+  }
+
+  function getReflection(date) {
+    return state.data.reflections.find(reflection => reflection.date === date);
+  }
+
+  function getCategory(id) {
+    return state.data.categories.find(category => category.id === id);
+  }
+
+  function getActivity(id) {
+    return state.data.activities.find(activity => activity.id === id);
+  }
+
+  function getActiveTarget(categoryId, period) {
+    const category = getCategory(categoryId);
+    return (category?.targets || []).find(target => target.active && target.period === period);
+  }
+
+  function getTargetRowsForPeriod(period, start, end) {
+    const days = daysBetween(start, end) + 1;
+    return state.data.categories.flatMap(category => (category.targets || [])
+      .filter(target => target.active && target.period === period)
+      .map(target => ({
+        category,
+        period: target.period,
+        type: target.type,
+        target: scaledTargetMinutes(target, days, start, end),
+        actual: getCategoryMinutesForRange(category.id, start, end)
+      })));
+  }
+
+  function getTargetRowsForRange(start, end) {
+    const days = daysBetween(start, end) + 1;
+    return state.data.categories.flatMap(category => (category.targets || [])
+      .filter(target => target.active)
+      .map(target => ({
+        category,
+        period: target.period,
+        type: target.type,
+        target: scaledTargetMinutes(target, days, start, end),
+        actual: getCategoryMinutesForRange(category.id, start, end)
+      })));
+  }
+
+  function scaledTargetMinutes(target, days, start, end) {
+    if (target.period === 'daily') return target.durationMinutes * days;
+    if (target.period === 'weekly') return target.durationMinutes * Math.max(1, Math.ceil(days / 7));
+    if (target.period === 'monthly') return target.durationMinutes * Math.max(1, countMonthsTouched(start, end));
+    return target.durationMinutes;
+  }
+
+  function summarizeTargets(rows) {
+    if (!rows.length) return 'No active targets';
+    const met = rows.filter(row => row.type === 'minimum' ? row.actual >= row.target : row.actual <= row.target).length;
+    return `${met}/${rows.length} targets okay`;
+  }
+
+  function getStreak() {
+    const threshold = Number(state.data.settings.streakMinimumLoggedMinutes || 720);
+    let current = 0;
+    for (let date = todayISO(); ; date = addDays(date, -1)) {
+      if (getLoggedMinutesByDate(date) >= threshold) current += 1;
+      else break;
+      if (current > 10000) break;
+    }
+
+    const dates = uniqueDates(state.data.logs.map(log => log.date)).sort();
+    let best = 0;
+    let run = 0;
+    let cursor = null;
+    dates.forEach(date => {
+      const hit = getLoggedMinutesByDate(date) >= threshold;
+      if (!hit) {
+        run = 0;
+        cursor = date;
+        return;
+      }
+      if (cursor && addDays(cursor, 1) === date) run += 1;
+      else run = 1;
+      best = Math.max(best, run);
+      cursor = date;
+    });
+    return { current, best };
+  }
+
+  function getSelectedRange() {
+    const today = todayISO();
+    const filter = state.report.filter;
+    if (filter === 'today') return { start: today, end: today };
+    if (filter === 'yesterday') return { start: addDays(today, -1), end: addDays(today, -1) };
+    if (filter === 'thisWeek') return weekRange(today);
+    if (filter === 'lastWeek') {
+      const current = weekRange(today);
+      return { start: addDays(current.start, -7), end: addDays(current.end, -7) };
+    }
+    if (filter === 'thisMonth') return monthRange(today);
+    if (filter === 'lastMonth') return monthRange(addMonths(today, -1));
+    let start = state.report.customStart || today;
+    let end = state.report.customEnd || start;
+    if (end < start) [start, end] = [end, start];
+    return { start, end };
+  }
+
+  function getComparisonBuckets(type) {
+    const today = todayISO();
+    if (type === 'wow') {
+      const current = weekRange(today);
+      return Array.from({ length: 6 }, (_, i) => {
+        const start = addDays(current.start, -7 * (5 - i));
+        const end = addDays(start, 6);
+        return { start, end, label: `W ${formatShortDate(start)}` };
+      });
+    }
+    if (type === 'mom') {
+      return Array.from({ length: 6 }, (_, i) => {
+        const base = addMonths(today, -(5 - i));
+        const range = monthRange(base);
+        return { ...range, label: monthShort(base) };
+      });
+    }
+    return Array.from({ length: 7 }, (_, i) => {
+      const date = addDays(today, -(6 - i));
+      return { start: date, end: date, label: weekdayShort(date) };
+    });
+  }
+
+  function getRadarRange() {
+    const today = todayISO();
+    if (state.report.radarPeriod === 'month') return monthRange(today);
+    if (state.report.radarPeriod === 'week') return weekRange(today);
+    return { start: today, end: today };
+  }
+
+  function getLineBuckets(range) {
+    const today = todayISO();
+    if (range === '30d') {
+      return Array.from({ length: 30 }, (_, i) => {
+        const date = addDays(today, -(29 - i));
+        return { start: date, end: date, label: formatShortDate(date) };
+      });
+    }
+    if (range === '12w') {
+      const current = weekRange(today);
+      return Array.from({ length: 12 }, (_, i) => {
+        const start = addDays(current.start, -7 * (11 - i));
+        const end = addDays(start, 6);
+        return { start, end, label: `W${formatShortDate(start)}` };
+      });
+    }
+    if (range === '12m') {
+      return Array.from({ length: 12 }, (_, i) => {
+        const base = addMonths(today, -(11 - i));
+        const range = monthRange(base);
+        return { ...range, label: monthShort(base) };
+      });
+    }
+    return Array.from({ length: 7 }, (_, i) => {
+      const date = addDays(today, -(6 - i));
+      return { start: date, end: date, label: weekdayShort(date) };
+    });
+  }
+
+  function getDayWindowMinutes() {
+    const start = timeToMinutes(state.data.settings.dayStartTime || '00:00');
+    const end = timeToMinutes(state.data.settings.dayEndTime || '24:00');
+    if (!Number.isFinite(start) || !Number.isFinite(end)) return 1440;
+    return Math.max(1, end - start);
+  }
+
+  function timeToMinutes(time) {
+    if (typeof time !== 'string') return NaN;
+    const match = time.trim().match(/^(\d{1,2}):(\d{2})$/);
+    if (!match) return NaN;
+    const h = Number(match[1]);
+    const m = Number(match[2]);
+    if (h === 24 && m === 0) return 1440;
+    if (h < 0 || h > 23 || m < 0 || m > 59) return NaN;
+    return h * 60 + m;
+  }
+
+  function minutesToTime(minutes) {
+    const safe = clamp(Math.round(minutes), 0, 1439);
+    return `${String(Math.floor(safe / 60)).padStart(2, '0')}:${String(safe % 60).padStart(2, '0')}`;
+  }
+
+  function formatTimeRange(start, end) {
+    return `${formatClock(start)} – ${formatClock(end)}`;
+  }
+
+  function formatClock(minutes) {
+    if (minutes === 1440) return '12:00 AM';
+    const h24 = Math.floor(minutes / 60) % 24;
+    const m = minutes % 60;
+    const suffix = h24 >= 12 ? 'PM' : 'AM';
+    const h12 = h24 % 12 || 12;
+    return `${h12}:${String(m).padStart(2, '0')} ${suffix}`;
+  }
+
+  function formatDuration(minutes) {
+    const safe = Math.max(0, Math.round(Number(minutes) || 0));
+    const h = Math.floor(safe / 60);
+    const m = safe % 60;
+    if (h && m) return `${h}h ${m}m`;
+    if (h) return `${h}h`;
+    return `${m}m`;
+  }
+
+  function formatDurationCompact(minutes) {
+    const safe = Math.max(0, Math.round(Number(minutes) || 0));
+    if (safe >= 60) return `${(safe / 60).toFixed(safe % 60 ? 1 : 0)}h`;
+    return `${safe}m`;
+  }
+
+  function formatSeconds(seconds) {
+    const safe = Math.max(0, Math.round(seconds));
+    return `${String(Math.floor(safe / 60)).padStart(2, '0')}:${String(safe % 60).padStart(2, '0')}`;
+  }
+
+  function todayISO() {
+    const d = new Date();
+    return dateToISO(d);
+  }
+
+  function dateToISO(date) {
+    const y = date.getFullYear();
+    const m = String(date.getMonth() + 1).padStart(2, '0');
+    const d = String(date.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  }
+
+  function parseISO(date) {
+    return new Date(`${date}T12:00:00`);
+  }
+
+  function addDays(date, days) {
+    const d = parseISO(date);
+    d.setDate(d.getDate() + days);
+    return dateToISO(d);
+  }
+
+  function addMonths(date, months) {
+    const d = parseISO(date);
+    d.setMonth(d.getMonth() + months);
+    return dateToISO(d);
+  }
+
+  function daysBetween(start, end) {
+    const ms = parseISO(end) - parseISO(start);
+    return Math.round(ms / 86400000);
+  }
+
+  function weekRange(date) {
+    const d = parseISO(date);
+    const day = d.getDay() || 7;
+    d.setDate(d.getDate() - day + 1);
+    const start = dateToISO(d);
+    d.setDate(d.getDate() + 6);
+    return { start, end: dateToISO(d) };
+  }
+
+  function monthRange(date) {
+    const d = parseISO(date);
+    const start = new Date(d.getFullYear(), d.getMonth(), 1, 12);
+    const end = new Date(d.getFullYear(), d.getMonth() + 1, 0, 12);
+    return { start: dateToISO(start), end: dateToISO(end) };
+  }
+
+  function countMonthsTouched(start, end) {
+    const s = parseISO(start);
+    const e = parseISO(end);
+    return (e.getFullYear() - s.getFullYear()) * 12 + (e.getMonth() - s.getMonth()) + 1;
+  }
+
+  function formatLongDate(date) {
+    return parseISO(date).toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+  }
+
+  function formatShortDate(date) {
+    return parseISO(date).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  }
+
+  function formatDateRange(start, end) {
+    return start === end ? formatLongDate(start) : `${formatShortDate(start)} – ${formatShortDate(end)}`;
+  }
+
+  function weekdayShort(date) {
+    return parseISO(date).toLocaleDateString(undefined, { weekday: 'short' });
+  }
+
+  function monthShort(date) {
+    return parseISO(date).toLocaleDateString(undefined, { month: 'short' });
+  }
+
+  function normalizeDayWindowTime(value) {
+    const text = String(value || '').trim();
+    return Number.isFinite(timeToMinutes(text)) ? text.padStart(5, '0') : '';
+  }
+
+  function parseTimeList(value) {
+    return String(value || '')
+      .split(',')
+      .map(item => item.trim())
+      .filter(item => Number.isFinite(timeToMinutes(item)))
+      .map(item => item.padStart(5, '0'));
+  }
+
+  function splitLines(value) {
+    return String(value || '').split('\n').map(line => line.trim()).filter(Boolean);
+  }
+
+  function nowMinutes() {
+    const d = new Date();
+    return d.getHours() * 60 + d.getMinutes();
+  }
+
+  function average(values) {
+    if (!values.length) return 0;
+    return values.reduce((sum, value) => sum + value, 0) / values.length;
+  }
+
+  function clamp(value, min, max) {
+    return Math.min(max, Math.max(min, value));
+  }
+
+  function uid() {
+    return `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 9)}`;
+  }
+
+  function uniqueDates(dates) {
+    return Array.from(new Set(dates));
+  }
+
+  function escapeHtml(value) {
+    return String(value ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#039;');
+  }
+
+  function truncate(value, length) {
+    const str = String(value || '');
+    return str.length > length ? `${str.slice(0, length - 1)}…` : str;
+  }
+
+  function capitalize(value) {
+    return String(value || '').charAt(0).toUpperCase() + String(value || '').slice(1);
+  }
+
+  function randomItem(items) {
+    const arr = Array.isArray(items) && items.length ? items : ['Keep going.'];
+    return arr[Math.floor(Math.random() * arr.length)];
+  }
+
+  function emptyState(text) {
+    return `<div class="alert"><p>${escapeHtml(text)}</p></div>`;
+  }
+
+  function toast(message) {
+    const node = $('#toast');
+    node.textContent = message;
+    node.classList.add('show');
+    clearTimeout(toast._timer);
+    toast._timer = setTimeout(() => node.classList.remove('show'), 2600);
+  }
+})();
